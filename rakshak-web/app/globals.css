@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --color-rakshak-bg: #F9F9F6;
+  --color-rakshak-text: #1A1A1A;
+  --color-rakshak-border: #E5E5E5;
+  --color-rakshak-accent: #2D2D2D;
+  --color-rakshak-success: #10B981;
+  --color-rakshak-warning: #F59E0B;
+  --color-rakshak-danger: #EF4444;
+}
+
+:root {
+  --background: var(--color-rakshak-bg);
+  --foreground: var(--color-rakshak-text);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Base styles for the quiet luxury feel */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-rakshak-border);
+}
+
+.terminal-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-scroll::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb {
+  background: #a3a3a3;
+  border-radius: 4px;
+}
+
+.terminal-scroll::-webkit-scrollbar-thumb:hover {
+  background: #737373;
+}
