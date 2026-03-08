@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import subprocess
 import os
+import shutil
+from fastapi.responses import StreamingResponse, FileResponse
 
 app = FastAPI()
 
@@ -127,24 +129,67 @@ async def stream_logs():
 @app.get("/api/bugs")
 async def get_bugs():
     bugs_path = "bugs.json"
-    if not os.path.exists(bugs_path):
-        return []
-        
-    try:
-        with open(bugs_path, "r", encoding="utf-8") as f:
-            vulnerabilities = json.load(f)
+    unresolved_path = "unresolved_bugs.json"
+    
+    all_bugs = []
+    
+    # 1. Load Unresolved Bugs
+    unresolved_list = []
+    if os.path.exists(unresolved_path):
+        try:
+            with open(unresolved_path, "r", encoding="utf-8") as f:
+                unresolved_list = json.load(f)
+        except Exception:
+            pass
             
-        # Give each bug a unique ID and default status for the UI
-        for i, bug in enumerate(vulnerabilities):
-            bug["id"] = f"vuln_{i}_{bug.get('line', 0)}"
-            bug["status"] = "Open"
-            # Map semgrep severity to UI severity
-            semgrep_sev = bug.get("severity", "WARNING").upper()
-            bug["severity"] = "Critical" if semgrep_sev == "ERROR" else "High" if semgrep_sev == "WARNING" else "Medium"
+    # Create a fast lookup for unresolved bugs
+    unresolved_signatures = {f"{b.get('file')}:{b.get('line')}" for b in unresolved_list}
+    
+    # 2. Load Current Bugs (from the latest scan)
+    if os.path.exists(bugs_path):
+        try:
+            with open(bugs_path, "r", encoding="utf-8") as f:
+                current_bugs = json.load(f)
+                
+            for i, bug in enumerate(current_bugs):
+                bug_sig = f"{bug.get('file')}:{bug.get('line')}"
+                
+                bug["id"] = f"vuln_{i}_{bug.get('line', 0)}"
+                
+                # If this bug is in the unresolved list, it's Unresolved.
+                # If the pipeline is running, it's being fixed.
+                # If the pipeline is stopped, it's Open.
+                if bug_sig in unresolved_signatures:
+                    bug["status"] = "Unresolved"
+                elif log_manager.is_running:
+                    bug["status"] = "Fixing..."
+                else:
+                    bug["status"] = "Open"
+                    
+                semgrep_sev = bug.get("severity", "WARNING").upper()
+                bug["severity"] = "Critical" if semgrep_sev == "ERROR" else "High" if semgrep_sev == "WARNING" else "Medium"
+                
+                all_bugs.append(bug)
+        except Exception:
+            pass
             
-        return vulnerabilities
-    except Exception as e:
-        return []
+    return all_bugs
+
+@app.get("/api/download")
+async def download_secured():
+    workspace_dir = os.path.join(os.getcwd(), "scanned_repo")
+    if not os.path.exists(workspace_dir):
+        return {"status": "error", "message": "No secured repository found. Run a scan first."}
+    
+    # Create a temporary zip file
+    zip_basename = os.path.join(os.getcwd(), "secured_code")
+    zip_path = shutil.make_archive(zip_basename, 'zip', workspace_dir)
+    
+    return FileResponse(
+        path=zip_path,
+        filename="secured_code.zip",
+        media_type="application/zip"
+    )
 
 if __name__ == "__main__":
     import uvicorn

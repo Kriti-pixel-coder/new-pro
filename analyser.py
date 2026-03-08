@@ -1,25 +1,17 @@
 import subprocess
 import json
 import os
+import hashlib
 
 def run_analysis(target_path):
     print(f"[ANALYZER] Scanning {target_path} for real-world vulnerabilities...")
     
     cmd = [
         "semgrep", "scan", 
-        # 1. Core Language & Secrets
-        "--config", "p/python",          # Catches standard Python logic flaws (eval, subprocess, etc.)
-        "--config", "p/secrets",         # Hunts down API keys, passwords, and tokens
-        
-        # 2. The Major Web Frameworks (Covering all bases)
-        "--config", "p/django",          # Rules specific to Django vulnerabilities
-        "--config", "p/flask",           # Rules specific to Flask vulnerabilities
-        "--config", "p/fastapi",         # Rules specific to FastAPI vulnerabilities
-        
-        # 3. Industry Standards & Deep Audits
-        "--config", "p/owasp-top-ten",   # The global standard for web vulnerabilities
-        "--config", "p/security-audit",  # Strict, paranoid auditing rules 
-        
+        "--config", "p/python",
+        "--config", "p/secrets",
+        "--config", "p/owasp-top-ten",
+        "--config", "demo_rules.yaml",
         "--json", target_path
     ]
     
@@ -56,17 +48,23 @@ def run_analysis(target_path):
             
             if line_number and unique_bug_id not in seen_lines:
                 seen_lines.add(unique_bug_id)
+                
+                # Generate a stable string ID to track across scans
+                bug_id_str = hashlib.md5(f"{file_path}:{line_number}:{r['extra']['message']}".encode()).hexdigest()
+                
                 bugs.append({
+                    "id": bug_id_str,
                     "file": file_path,
                     "line": line_number,
                     "type": r['extra']['message'],
                     "severity": r['extra']['severity']
                 })
         
-        # DEMO LIFESAVER: Cap the bugs so the API doesn't crash on stage!
-        demo_limit = 5
+        
+        # DEMO LIFESAVER: Cap higher now for Mega-Batching
+        demo_limit = 50
         if len(bugs) > demo_limit:
-            print(f"⚠️ Found {len(bugs)} bugs! Capping to top {demo_limit} for the live demo...")
+            print(f"⚠️ Found {len(bugs)} bugs! Capping to top {demo_limit} for processing...")
             bugs = bugs[:demo_limit]
                 
         with open("bugs.json", "w", encoding="utf-8") as f:

@@ -1,117 +1,225 @@
 import os
 import json
 import time
-from google import genai
+import requests
 
-# Paste your API key here
-client = genai.Client(api_key="AIzaSyDAk2rXS8XQ4ltUeZHjyq5t4S_Nvcn14NA")
+# ============================================================================
+#  🔗 KAGGLE CODEQWEN CONNECTION
+#  Set the KAGGLE_API_URL environment variable to your ngrok URL, OR
+#  paste your ngrok URL directly below.
+#  Example: https://xxxx-xxxx-xxxx.ngrok-free.app
+# ============================================================================
+KAGGLE_API_URL = os.environ.get("KAGGLE_API_URL", "https://ira-nonevaporating-phonogramically.ngrok-free.dev")
 
-def run_remediation(json_path):
+def run_remediation(json_path, target_bug_type=None):
     with open(json_path, "r", encoding="utf-8") as f:
         vulnerabilities = json.load(f)
 
     # 1. Group bugs by file
-    files_to_fix = {}
-    for v in vulnerabilities:
-        path = v['file']
-        if path not in files_to_fix: files_to_fix[path] = []
-        files_to_fix[path].append(v)
+    if target_bug_type:
+        target_bugs = [v for v in vulnerabilities if v['type'] == target_bug_type]
+        print(f"\n🚀 HEALER: Preparing to fix {len(target_bugs)} instances of '{target_bug_type}'...")
+    else:
+        target_bugs = vulnerabilities
+        print(f"\n🚀 HEALER [MEGA-BATCH]: Preparing to fix {len(target_bugs)} vulnerabilities across all types...")
 
-    if not files_to_fix:
+    if not target_bugs:
         return
 
-    # 2. THE MEGA-BATCH ENGINE
-    file_paths = list(files_to_fix.keys())
-    chunk_size = 3 # Process 3 files at once to save your RPD!
+    # 2. Build ONE consolidated prompt for all bugs
+    prompt_context = ""
     
-    for i in range(0, len(file_paths), chunk_size):
-        chunk = file_paths[i:i + chunk_size]
+    files_for_this_type = {}
+    for b in target_bugs:
+        path = b['file']
+        if path not in files_for_this_type: files_for_this_type[path] = []
+        files_for_this_type[path].append(b)
         
-        print(f"\n🚀 MEGA-BATCH: Sending {len(chunk)} files to Gemini 2.5...")
-        
-        # Build the combined prompt
-        prompt_context = ""
-        for path in chunk:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+    def fuzzy_replace(content, original, fixed):
+        """Try exact match first, then fallback to whitespace-insensitive match."""
+        # 1. Exact Match
+        if original in content:
+            return content.replace(original, fixed), True
             
-            context_blocks = []
-            for b in files_to_fix[path]:
+        # 2. Fuzzy Match (Ignore horizontal whitespace per line)
+        import re
+        def normalize(s):
+            return "\n".join([line.strip() for line in s.strip().split("\n")])
+        
+        norm_original = normalize(original)
+        if not norm_original: return content, False
+        
+        # Split content into lines and check for the normalized snippet
+        content_lines = content.splitlines()
+        orig_lines = norm_original.splitlines()
+        
+        for i in range(len(content_lines) - len(orig_lines) + 1):
+            window = content_lines[i : i + len(orig_lines)]
+            norm_window = "\n".join([l.strip() for l in window])
+            
+            if norm_window == norm_original:
+                # We found the block! Replace it.
+                new_content_lines = content_lines[:i] + [fixed] + content_lines[i + len(orig_lines):]
+                return "\n".join(new_content_lines), True
+                
+        return content, False
+
+    for path, bugs_in_file in files_for_this_type.items():
+        try:
+            # Let's cleanly resolve the file path in case it's wrong in JSON
+            actual_path = path
+            if not os.path.exists(actual_path):
+                base_name = os.path.basename(path)
+                potential_path = os.path.join(os.getcwd(), "scanned_repo", "dummy_repo", base_name)
+                if os.path.exists(potential_path):
+                    actual_path = potential_path
+                else: 
+                    print(f"   ❌ ERROR: Could not find file on disk: '{path}'")
+                    continue
+                    
+            with open(actual_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            # splitlines(True) keeps whitespace and newlines perfectly intact
+            lines = content.splitlines(keepends=True)
+
+            # Merge overlapping 41-line windows (+/- 20 lines) to save tokens
+            ranges = []
+            for b in bugs_in_file:
                 line_idx = b['line'] - 1
                 start_idx = max(0, line_idx - 20)
                 end_idx = min(len(lines), line_idx + 21)
-                        
-                snippet = "".join(lines[start_idx:end_idx])
-                context_blocks.append(f"BUG ON LINE {b['line']} ({b['type']}):\n{snippet}")
-            
-            bugs = "\n\n".join(context_blocks)
-            prompt_context += f"\n\n--- FILE: {path} ---\n{bugs}\n"
+                ranges.append([start_idx, end_idx])
 
-        prompt = f"""Act as a Senior Security Engineer. Fix ALL vulnerabilities in the multiple files provided below.
-        
-        {prompt_context}
-        
-        CRITICAL RULES:
-        1. You MUST return the fixed code in a strict JSON format.
-        2. The JSON keys MUST be the exact file paths provided.
-        3. The JSON values MUST be an array of objects containing `"original_snippet"` and `"fixed_snippet"`.
-        4. "original_snippet" MUST BE an exact substring matching the raw code, containing the vulnerability.
-        5. "fixed_snippet" MUST BE the corrected replacement code for that snippet.
-        6. Do NOT include any markdown formatting, explanations, or ```json blocks. Return ONLY the raw parseable JSON object.
-        
-        Example Output Format:
-        {{
-          "path/to/file1.py": [
-             {{
-                "original_snippet": "os.system('rm -rf ' + user_input)",
-                "fixed_snippet": "subprocess.run(['rm', '-rf', user_input], check=True)"
-             }}
-          ]
-        }}
-        """
-        # Retry loop with exponential backoff for rate limits
-        max_api_retries = 3
-        for attempt in range(max_api_retries):
-            try:
-                # --- USING YOUR NEW MODEL ---
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash-lite", 
-                    contents=prompt
-                )
+            # Merge standard interval algorithm
+            ranges.sort()
+            merged_ranges = []
+            if ranges:
+                curr_start, curr_end = ranges[0]
+                for next_start, next_end in ranges[1:]:
+                    if next_start <= curr_end:
+                        curr_end = max(curr_end, next_end)
+                    else:
+                        merged_ranges.append((curr_start, curr_end))
+                        curr_start, curr_end = next_start, next_end
+                merged_ranges.append((curr_start, curr_end))
+
+            applied_any = False
+            for start, end in merged_ranges:
+                snippet = "".join(lines[start:end])
                 
-                # 3. UNPACK THE MEGA-BATCH
-                clean_json = response.text.strip().replace("```json", "").replace("```", "")
-                fixed_files = json.loads(clean_json)
+                issues_text = ""
+                for b in bugs_in_file:
+                    if start <= b['line'] - 1 < end:
+                        issues_text += f"- Issue at line {b['line']}: {b['type']}\n"
                 
-                for path, fixes in fixed_files.items():
-                    with open(path, "r", encoding="utf-8") as f:
-                        file_content = f.read()
-                    
-                    for fix in fixes:
-                        if "original_snippet" in fix and "fixed_snippet" in fix:
-                            file_content = file_content.replace(fix["original_snippet"], fix["fixed_snippet"])
-                    
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(file_content)
-                    print(f"✅ Secured {path}")
-                    
-                # A 2-second wait keeps you safely under logic limits without wasting time
-                time.sleep(2) 
-                break  # Success, exit retry loop
+                prompt = f"""[INST] You are an expert security engineer. Fix the vulnerabilities in the following code snippet. 
+Return strictly the fixed raw code only.
+Do not use markdown blocks (like ```python or ```).
+Do not include explanations or any other text.
+The code you return will completely and directly replace the original snippet.
+
+Vulnerabilities:
+{issues_text}
+
+Original Code Snippet:
+{snippet}
+[/INST]"""
+
+                max_api_retries = 3
+                print("\n--- DEBUG: PROMPT SENT TO AI ---")
+                print(prompt)
+                print("--------------------------------\n")
                 
-            except json.JSONDecodeError:
-                print("❌ AI failed to format the batch properly. It will try again next iteration.")
-                time.sleep(5)
-                break  # Don't retry on bad JSON, move to next iteration
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                    wait_time = 35 * (attempt + 1)  # 35s, 70s, 105s
-                    print(f"⏳ Rate limited (attempt {attempt + 1}/{max_api_retries}). Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    if attempt == max_api_retries - 1:
-                        print("❌ Max retries hit for this batch. Moving to next iteration.")
-                else:
-                    print(f"❌ Batch Error: {e}")
-                    time.sleep(10)
-                    break
+                for attempt in range(max_api_retries):
+                    try:
+                        print(f"   📡 Sending to {KAGGLE_API_URL}/generate ...")
+                        api_response = requests.post(
+                            f"{KAGGLE_API_URL}/generate",
+                            json={"prompt": prompt, "max_tokens": 4096},
+                            headers={"ngrok-skip-browser-warning": "true"},
+                            timeout=300 
+                        )
+                        api_response.raise_for_status()
+
+                        raw_text = api_response.json().get("response", "")
+                        
+                        print("\n--- DEBUG: RAW RESPONSE FROM AI ---")
+                        print(raw_text)
+                        print("-----------------------------------\n")
+
+                        # clean markdown blocks if the AI still included them
+                        clean_text = raw_text.strip()
+                        if clean_text.startswith("```"):
+                            import re
+                            match = re.search(r'```(?:python|py|json)?\n?(.*?)\s*```', clean_text, re.DOTALL)
+                            if match:
+                                clean_text = match.group(1).strip()
+                            else:
+                                clean_text = clean_text.replace("```python", "").replace("```json", "").replace("```", "").strip()
+                                
+                        # Handle case where AI still stubbornly returns JSON
+                        if clean_text.startswith("{") and "}" in clean_text:
+                            try:
+                                parsed = json.loads(clean_text)
+                                if isinstance(parsed, dict):
+                                    extracted = None
+                                    if "fixed_code" in parsed:
+                                        extracted = parsed["fixed_code"]
+                                    elif "code" in parsed:
+                                        extracted = parsed["code"]
+                                    elif len(parsed) == 1:
+                                        extracted = list(parsed.values())[0]
+                                    
+                                    if isinstance(extracted, list):
+                                        clean_text = "\n".join([str(x) for x in extracted])
+                                    elif extracted is not None:
+                                        clean_text = str(extracted)
+                            except Exception:
+                                pass
+                                
+                        # Ensure it ends with a newline if the original did
+                        if snippet.endswith("\n") and not clean_text.endswith("\n"):
+                            clean_text += "\n"
+
+                        if clean_text:
+                            new_content, success = fuzzy_replace(content, snippet, clean_text)
+                            if success:
+                                content = new_content
+                                applied_any = True
+                                break # Move to next snippet
+                            else:
+                                print(f"   ⚠️ Could not fuzzy match original snippet. Overwriting file with direct replace...")
+                                if snippet in content:
+                                    content = content.replace(snippet, clean_text)
+                                    applied_any = True
+                                    break
+                                else:
+                                    print("   ❌ Direct replace failed too.")
+                        else:
+                            print("   ❌ AI returned empty response. Retrying...")
+                            time.sleep(3)
+                            
+                    except requests.exceptions.Timeout:
+                        print(f"⏳ Timeout (Attempt {attempt+1}). Model heavy load...")
+                        time.sleep(15)
+                    except requests.exceptions.ConnectionError as e:
+                        if "RemoteDisconnected" in str(e) or "Connection aborted" in str(e):
+                            print(f"⌛ Ngrok connection timed out while AI was still generating (took >60s).")
+                            print("   🚨 The Kaggle server is STILL processing this request in the background.")
+                            print("   🚨 We will wait 3 minutes before retrying to prevent overloading Kaggle's queue!")
+                            time.sleep(180)
+                        else:
+                            print(f"❌ Connection Error: {e}")
+                            time.sleep(5)
+                    except Exception as e:
+                        print(f"❌ Error: {e}")
+                        time.sleep(5)
+                        
+            if applied_any:
+                with open(actual_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"   ✅ Applied fixes to {os.path.basename(actual_path)}")
+
+        except Exception as e:
+            print(f"⚠️ Error reading/processing {path}: {e}")

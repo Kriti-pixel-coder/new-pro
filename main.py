@@ -24,45 +24,103 @@ def clone_repo(repo_url, target_dir):
         exit(1)
 
 def start_autonomous_remediation(target_path):
-    """Runs the scanning and healing loop with a 15s safety delay."""
-    max_retries = 10
-    iteration = 0
+    """Runs the scanning and healing loop sequentially, one bug type at a time, with 3 retries each."""
+    import json
     
-    while iteration < max_retries:
-        iteration += 1
-        print(f"\n{'='*20} ITERATION {iteration} {'='*20}")
+    # Ensure starting clean
+    if os.path.exists("unresolved_bugs.json"):
+        os.remove("unresolved_bugs.json")
+    
+    unresolved_bugs = []
+    
+    print(f"\n{'='*20} INITIAL SCAN {'='*20}")
+    bug_count = run_analysis(target_path)
+    
+    if bug_count == 0:
+        print(f"\n🎉 SUCCESS: No vulnerabilities found in {target_path}!")
+        return
+    elif bug_count == -1:
+        print("\n⚠️ Analyzer crashed. Check your Semgrep installation.")
+        return
         
-        # 1. ANALYZE
-        bug_count = run_analysis(target_path)
+    print(f"❗ Found {bug_count} vulnerabilities initially.")
+    
+    # Load all bugs to determine unique types
+    with open("bugs.json", "r", encoding="utf-8") as f:
+        all_bugs = json.load(f)
         
-        if bug_count == 0:
-            print(f"\n🎉 SUCCESS: All vulnerabilities patched in {target_path}!")
-            return
-        elif bug_count == -1:
-            print("\n⚠️ Analyzer crashed. Check your Semgrep installation.")
-            return
+    # Extract unique bug types
+    bug_types = list(set(bug['type'] for bug in all_bugs))
+    print(f"📋 Found {len(bug_types)} unique vulnerability types.")
+    
+    for current_type in bug_types:
+        print(f"\n{'='*20} TARGETING BUG TYPE: {current_type} {'='*20}")
+        
+        for attempt in range(1, 4): # Up to 3 retries per type
+            print(f"\n--- Attempt {attempt}/3 for '{current_type}' ---")
             
-        print(f"❗ Found {bug_count} vulnerabilities. Starting AI Healing...")
-        
-        # 2. HEAL
-        run_remediation("bugs.json")
-        
-        # 3. THE 5S RATE LIMIT SHIELD
-        print(f"\n⏳ Iteration {iteration} complete. Waiting 5s to reset API limits...")
-        for i in range(10, 0, -1):
-            print(f"\rNext scan in: {i}s  ", end="")
-            time.sleep(1)
-        print("\n")
-        
-    print(f"\n{'='*20} FINAL VERIFICATION {'='*20}")
-    final_bug_count = run_analysis(target_path)
-    
-    if final_bug_count == 0:
-        print(f"\n🎉 SUCCESS: All vulnerabilities patched in {target_path}!")
-    elif final_bug_count == -1:
-        print("\n⚠️ Analyzer crashed during final verification.")
+            # Read current bugs
+            with open("bugs.json", "r", encoding="utf-8") as f:
+                current_bugs = json.load(f)
+                
+            # Filter actionable bugs for THIS TYPE that are not already unresolved
+            actionable_bugs = []
+            unresolved_ids = {b['id'] for b in unresolved_bugs}
+            
+            for bug in current_bugs:
+                if bug['type'] == current_type and bug['id'] not in unresolved_ids:
+                    actionable_bugs.append(bug)
+                    
+            if not actionable_bugs:
+                print(f"✅ No more actionable bugs of type '{current_type}' left.")
+                break # Move to next type
+                
+            print(f"🔨 Sending {len(actionable_bugs)} bugs of type '{current_type}' to AI...")
+            
+            # Write only these specific bugs for healer
+            with open("actionable_bugs.json", "w", encoding="utf-8") as f:
+                json.dump(actionable_bugs, f, indent=2)
+                
+            # Run remediation specifically for these bugs
+            run_remediation("actionable_bugs.json", target_bug_type=current_type)
+            
+            # Verify fixes
+            print("\n🔍 Verifying fixes...")
+            new_bug_count = run_analysis(target_path)
+            
+            with open("bugs.json", "r", encoding="utf-8") as f:
+                new_scan_bugs = json.load(f)
+                
+            # Count remaining bugs of THIS type
+            remaining_of_type = [b for b in new_scan_bugs if b['type'] == current_type]
+            
+            if len(remaining_of_type) == 0:
+                 print(f"🎉 Successfully fixed all bugs of type '{current_type}'!")
+                 break # Done with this type, move to next
+                 
+            if len(remaining_of_type) >= len(actionable_bugs):
+                print(f"⚠️ No progress made on '{current_type}' in this attempt.")
+                
+            if attempt == 3 and len(remaining_of_type) > 0:
+                print(f"❌ Could not fully resolve '{current_type}' after 3 attempts.")
+                # Mark remaining as unresolved
+                current_ids = {b['id'] for b in new_scan_bugs}
+                for b in actionable_bugs:
+                    if b['id'] in current_ids:
+                        unresolved_bugs.append(b)
+                
+                # Update unresolved JSON file
+                with open("unresolved_bugs.json", "w", encoding="utf-8") as f:
+                    json.dump(unresolved_bugs, f, indent=2)
+                    
+            time.sleep(2) # Brief pause between attempts
+            
+    print(f"\n{'='*20} FINAL SUMMARY {'='*20}")
+    if unresolved_bugs:
+        print(f"⚠️ {len(unresolved_bugs)} vulnerabilities remain unresolved after max retries.")
+        print("   They have been logged to unresolved_bugs.json for frontend display.")
     else:
-        print(f"⚠️ Max iterations reached. {final_bug_count} vulnerabilities remain. Manual review recommended.")
+        print(f"🎉 All target vulnerabilities patched successfully!")
 
 if __name__ == "__main__":
     import sys

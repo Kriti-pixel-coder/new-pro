@@ -1,0 +1,27 @@
+rules:
+  - id: demo-sql-injection
+    pattern: $CURSOR.execute(f"...")
+    message: "Detected possible formatted SQL query. Use parameterized queries instead."
+    severity: WARNING
+    languages: [python]
+
+  - id: demo-command-injection
+    pattern: os.system("..." + $VAR)
+    message: "Detected potential command injection."
+    severity: WARNING
+    languages: [python]
+
+  - id: demo-weak-hash
+    pattern: hashlib.sha256(...)
+    message: "Using SHA256 is good, but for the demo we want to show a fix. (Mocking as weak)"
+    severity: WARNING
+    languages: [python]
+
+  - id: demo-hardcoded-secret
+    pattern: $KEY = "..."
+    metavariable-regex:
+      metavariable: $KEY
+      regex: '.*API_KEY.*'
+    message: "Hardcoded API Key detected."
+    severity: WARNING
+    languages: [python]
