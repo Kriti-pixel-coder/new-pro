@@ -100,7 +100,7 @@ rakshak/
 
 ```bash
 git clone <your-repo-url>
-cd rakshak
+cd new-pro
 ```
 
 ### 2. Install Python dependencies
@@ -123,9 +123,6 @@ set KAGGLE_API_URL=https://your-ngrok-url.ngrok-free.app
 export KAGGLE_API_URL=https://your-ngrok-url.ngrok-free.app
 ```
 
-**Option B — Google Gemini:**
-
-Set your `GEMINI_API_KEY` and update `healer.py` to use the Gemini SDK.
 
 ### 4. Run the Remediation Pipeline
 
@@ -153,6 +150,8 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to view the real-time dashboard.
+
+test it with the repo: https://github.com/Kriti-pixel-coder/test-repo.git
 
 ---
 
